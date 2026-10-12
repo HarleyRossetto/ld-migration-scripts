@@ -664,6 +664,9 @@ if (inputArgs.excludeFlags) {
 // Source keys of everything migrated, used for reference remapping and the key length preflight
 const migratedFlagKeys = new Set<string>(flagList);
 const migratedSegmentKeys = new Set<string>();
+// Final destination keys after conflict resolution (source key -> destination key)
+const resolvedFlagKeys = new Map<string, string>();
+const resolvedSegmentKeysByEnv = new Map<string, Map<string, string>>();
 if (inputArgs.migrateSegments) {
   for (const envKey of envkeys) {
     const segs = await getJson(
@@ -1045,6 +1048,11 @@ if (inputArgs.migrateSegments) {
         } else {
           console.log(Colors.yellow(`    ⚠ Could not read existing tags for segment ${segmentKey} (${existingSegmentResp.status})`));
         }
+      }
+
+      if (segmentCreated) {
+        if (!resolvedSegmentKeysByEnv.has(destEnvKey)) resolvedSegmentKeysByEnv.set(destEnvKey, new Map());
+        resolvedSegmentKeysByEnv.get(destEnvKey)!.set(segment.key, segmentKey);
       }
 
       // Big segments: load members via the CSV import endpoint instead of patches
@@ -2020,6 +2028,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
 
   // Add flag env settings - use the potentially updated flag key
   if (flagCreated) {
+    resolvedFlagKeys.set(flag.key, createdFlagKey);
     // Fetch the destination flag to get the correct variation IDs and current environment state
     // (LaunchDarkly generates new UUIDs when the flag is created)
     let destinationVariations = flag.variations; // Fallback to source variations
@@ -2147,7 +2156,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
             const envRules = keyPrefix
               ? remapRuleSegmentReferences(
                 parsedData[key] as unknown as Rule[],
-                { segmentKeys: migratedSegmentKeys, keyPrefix },
+                { segmentKeys: migratedSegmentKeys, keyPrefix, resolved: resolvedSegmentKeysByEnv.get(destEnvKey) },
               )
               : parsedData[key] as unknown as Rule[];
             patchReq.push(buildRulesReplace(envRules, "environments/" + destEnvKey));
@@ -2156,7 +2165,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
             buildPatch(
               `environments/${destEnvKey}/${key}`,
               "replace",
-              remapPrerequisites(parsedData[key] as unknown as Array<{ key?: string }>, { flagKeys: migratedFlagKeys, keyPrefix }),
+              remapPrerequisites(parsedData[key] as unknown as Array<{ key?: string }>, { flagKeys: migratedFlagKeys, keyPrefix, resolved: resolvedFlagKeys }),
             ),
           );
         } else {

@@ -60,3 +60,27 @@ Deno.test("remapRuleSegmentReferences only rewrites segmentMatch values", () => 
   ]);
   assertEquals((result[0].clauses[1] as { values: unknown[] }).values, ["seg"]);
 });
+
+Deno.test("remap helpers prefer resolved (conflict-renamed) keys", () => {
+  const prereqs = remapPrerequisites(
+    [{ key: "a" }, { key: "b" }],
+    {
+      flagKeys: new Set(["a", "b"]),
+      keyPrefix: "p-",
+      resolved: new Map([["a", "c-p-a"]]),
+    },
+  );
+  assertEquals(prereqs.map((r) => r.key), ["c-p-a", "p-b"]);
+
+  const rules = remapRuleSegmentReferences(
+    [{ clauses: [{ op: "segmentMatch", values: ["seg"] }] }],
+    {
+      segmentKeys: new Set(["seg"]),
+      keyPrefix: "p-",
+      resolved: new Map([["seg", "c-p-seg"]]),
+    },
+  );
+  assertEquals((rules[0].clauses[0] as { values: unknown[] }).values, [
+    "c-p-seg",
+  ]);
+});

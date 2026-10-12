@@ -53,6 +53,8 @@ interface ReferenceSets {
   flagKeys: ReadonlySet<string>;
   segmentKeys: ReadonlySet<string>;
   keyPrefix: string | null | undefined;
+  /** Source key -> final destination key, for resources renamed by conflict resolution. */
+  resolved?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -62,18 +64,24 @@ interface ReferenceSets {
  */
 export function remapPrerequisites<T extends { key?: string }>(
   prerequisites: T[],
-  { flagKeys, keyPrefix }: Pick<ReferenceSets, "flagKeys" | "keyPrefix">,
+  { flagKeys, keyPrefix, resolved }: Pick<
+    ReferenceSets,
+    "flagKeys" | "keyPrefix" | "resolved"
+  >,
 ): T[] {
   return prerequisites.map((p) =>
     p?.key && flagKeys.has(p.key)
-      ? { ...p, key: applyKeyPrefix(p.key, keyPrefix) }
+      ? { ...p, key: resolved?.get(p.key) ?? applyKeyPrefix(p.key, keyPrefix) }
       : p
   );
 }
 
 export function remapRuleSegmentReferences<T extends { clauses: unknown[] }>(
   rules: T[],
-  { segmentKeys, keyPrefix }: Pick<ReferenceSets, "segmentKeys" | "keyPrefix">,
+  { segmentKeys, keyPrefix, resolved }: Pick<
+    ReferenceSets,
+    "segmentKeys" | "keyPrefix" | "resolved"
+  >,
 ): T[] {
   return rules.map((rule) => ({
     ...rule,
@@ -86,7 +94,7 @@ export function remapRuleSegmentReferences<T extends { clauses: unknown[] }>(
         ...clause,
         values: clause.values.map((v) =>
           typeof v === "string" && segmentKeys.has(v)
-            ? applyKeyPrefix(v, keyPrefix)
+            ? resolved?.get(v) ?? applyKeyPrefix(v, keyPrefix)
             : v
         ),
       };
