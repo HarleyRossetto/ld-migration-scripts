@@ -41,6 +41,9 @@ migration:
   #   - imported-from-us
   #   - legacy-project
 
+  # Prefix for every migrated flag/segment key and name (optional)
+  # keyPrefix: "us."
+
   # Organize in view
   targetView: "us-migration-2024"
   

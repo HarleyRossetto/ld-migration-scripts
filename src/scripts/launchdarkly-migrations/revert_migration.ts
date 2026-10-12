@@ -15,6 +15,7 @@ import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { ldAPIRequest, ldAPIPostRequest, rateLimitRequest } from "../../utils/utils.ts";
 import { getDestinationApiKey, getSourceApiKey } from "../../utils/api_keys.ts";
+import { applyKeyPrefix } from "../../utils/key_prefix.ts";
 
 // ==================== Type Definitions ====================
 
@@ -29,6 +30,7 @@ interface MigrationWorkflowConfig {
   };
   migration?: {
     targetView?: string;
+    keyPrefix?: string | null;
   };
 }
 
@@ -41,6 +43,7 @@ interface RevertConfig {
   viewKeys?: string[];
   configFile?: string;
   useSourceData?: boolean;
+  keyPrefix?: string;
 }
 
 interface Arguments {
@@ -52,6 +55,7 @@ interface Arguments {
   views?: string;
   config?: string;
   useSourceData?: boolean;
+  keyPrefix?: string;
 }
 
 interface Flag {
@@ -126,6 +130,7 @@ const extractRevertConfigFromWorkflow = async (
       ? cliArgs.views.split(",")
       : (workflowConfig.migration?.targetView ? [workflowConfig.migration.targetView] : undefined),
     configFile: configPath,
+    keyPrefix: cliArgs.keyPrefix ?? workflowConfig.migration?.keyPrefix ?? undefined,
     useSourceData: cliArgs.useSourceData !== false // Default to true when config is provided
   };
 };
@@ -142,6 +147,8 @@ const parseArguments = async (): Promise<RevertConfig> => {
     .alias("delete-views", "delete-views")
     .alias("v", "views")
     .alias("use-source-data", "use-source-data")
+    .string("key-prefix")
+    .alias("key-prefix", "keyPrefix")
     .boolean("dry-run")
     .boolean("delete-views")
     .boolean("use-source-data")
@@ -152,6 +159,7 @@ const parseArguments = async (): Promise<RevertConfig> => {
     .describe("dry-run", "Preview actions without making changes")
     .describe("delete-views", "Delete views after unlinking flags")
     .describe("v", "Comma-separated list of view keys to process")
+    .describe("key-prefix", "Key prefix used during migration (destination flags are looked up by prefixed key)")
     .describe("use-source-data", "Use extracted source data for faster flag list (default: true with --config)")
     .parse() as Arguments;
 
@@ -173,6 +181,7 @@ const parseArguments = async (): Promise<RevertConfig> => {
     dryRun: args.dryRun || false,
     deleteViews: args.deleteViews || false,
     viewKeys: args.views ? args.views.split(",") : undefined,
+    keyPrefix: args.keyPrefix,
     useSourceData: false
   };
 };
@@ -360,7 +369,8 @@ const discoverMigrationFlags = async (
   // Strategy 1: Use source data for precise flag list (much faster!)
   if (config.useSourceData && config.sourceProjectKey) {
     console.log(Colors.cyan("  Using extracted source data for flag list (smart mode)"));
-    const sourceFlags = await loadFlagListFromSourceData(config.sourceProjectKey);
+    const sourceFlags = (await loadFlagListFromSourceData(config.sourceProjectKey))
+      .map((key) => applyKeyPrefix(key, config.keyPrefix));
     
     if (sourceFlags.length > 0) {
       console.log(Colors.gray(`  Found ${sourceFlags.length} flag(s) in source data`));

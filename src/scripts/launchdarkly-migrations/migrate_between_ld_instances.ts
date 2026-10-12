@@ -24,6 +24,14 @@ import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
 import { mergeTags } from "../../utils/tags.ts";
+import {
+  applyKeyPrefix,
+  findOverlongKeys,
+  MAX_KEY_LENGTH,
+  remapPrerequisites,
+  remapRuleSegmentReferences,
+  validateKeyPrefix,
+} from "../../utils/key_prefix.ts";
 
 interface Arguments {
   projKeySource: string;
@@ -32,6 +40,7 @@ interface Arguments {
   migrateSegments: boolean;
   conflictPrefix?: string;
   tags?: string;
+  keyPrefix?: string;
   onConflict?: string;
   targetView?: string;
   environments?: string;
@@ -83,6 +92,7 @@ interface MigrationConfig {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
     tags?: string[] | null;
+    keyPrefix?: string | null;
     conflictPrefix?: string;
     onConflict?: string;
     targetView?: string;
@@ -205,6 +215,8 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("s", "migrateSegments")
   .alias("c", "conflictPrefix")
   .string("tags")
+  .string("key-prefix")
+  .alias("key-prefix", "keyPrefix")
   .alias("on-conflict", "onConflict")
   .choices("on-conflict", ["prompt", "skip", "overwrite", "prefix", "abort"])
   .alias("v", "targetView")
@@ -228,6 +240,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .default("s", true)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
   .describe("tags", "Comma-separated tags to add to migrated flags and segments")
+  .describe("key-prefix", "Prefix prepended to the key and name of every migrated flag and segment (letters, numbers, '.', '-', '_')")
   .describe("on-conflict", "What to do when a flag/segment key already exists: prompt (interactive), skip, overwrite (default), prefix (requires -c), abort")
   .describe("v", "View key to link all migrated flags to")
   .describe("e", "Comma-separated list of environment keys to migrate (e.g., 'production,staging')")
@@ -263,6 +276,7 @@ if (cliArgs.config) {
         : opts?.migrateSegments ?? true,
       conflictPrefix: cliArgs.conflictPrefix || opts?.conflictPrefix,
       tags: cliArgs.tags ?? (opts?.tags?.length ? opts.tags.join(",") : undefined),
+      keyPrefix: cliArgs.keyPrefix ?? opts?.keyPrefix ?? undefined,
       onConflict: cliArgs.onConflict || opts?.onConflict,
       targetView: cliArgs.targetView || opts?.targetView,
       environments: cliArgs.environments || opts?.environments?.join(','),
@@ -302,6 +316,15 @@ if (!inputArgs.projKeySource || !inputArgs.projKeyDest) {
   Deno.exit(1);
 }
 
+const keyPrefix: string | undefined = inputArgs.keyPrefix === undefined || inputArgs.keyPrefix === null
+  ? undefined
+  : String(inputArgs.keyPrefix);
+const keyPrefixError = validateKeyPrefix(keyPrefix);
+if (keyPrefixError) {
+  console.log(Colors.red(`Error: ${keyPrefixError}`));
+  Deno.exit(1);
+}
+
 console.log(Colors.blue("\n📋 Configuration Summary:"));
 console.log(Colors.gray(`  Source: ${inputArgs.projKeySource}`));
 console.log(Colors.gray(`  Destination: ${inputArgs.projKeyDest}`));
@@ -311,6 +334,7 @@ console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'
 console.log(Colors.gray(`  On Conflict: ${inputArgs.onConflict || (inputArgs.conflictPrefix ? 'prefix' : 'overwrite')}`));
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
 console.log(Colors.gray(`  Tags: ${migrationTags.length > 0 ? migrationTags.join(', ') : 'none'}`));
+console.log(Colors.gray(`  Key Prefix: ${keyPrefix || 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
 console.log(Colors.gray(`  Domain: ${inputArgs.domain || 'app.launchdarkly.com'}`));
@@ -637,6 +661,31 @@ if (inputArgs.excludeFlags) {
   }
 }
 
+// Source keys of everything migrated, used for reference remapping and the key length preflight
+const migratedFlagKeys = new Set<string>(flagList);
+const migratedSegmentKeys = new Set<string>();
+if (inputArgs.migrateSegments) {
+  for (const envKey of envkeys) {
+    const segs = await getJson(
+      `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/segments/${envKey}.json`,
+    );
+    for (const seg of segs?.items ?? []) migratedSegmentKeys.add(seg.key);
+  }
+}
+
+if (keyPrefix || inputArgs.conflictPrefix) {
+  const overlong = [
+    ...findOverlongKeys(migratedFlagKeys, keyPrefix, inputArgs.conflictPrefix).map((k) => ({ ...k, type: 'flag' })),
+    ...findOverlongKeys(migratedSegmentKeys, keyPrefix, inputArgs.conflictPrefix).map((k) => ({ ...k, type: 'segment' })),
+  ];
+  if (overlong.length > 0) {
+    console.log(Colors.red(`❌ ${overlong.length} destination key(s) would exceed LaunchDarkly's ${MAX_KEY_LENGTH} character limit:`));
+    overlong.slice(0, 25).forEach((k) => console.log(Colors.red(`  ${k.type} "${k.sourceKey}" → ${k.destKey.length} chars`)));
+    if (overlong.length > 25) console.log(Colors.red(`  ...and ${overlong.length - 25} more`));
+    Deno.exit(1);
+  }
+}
+
 const flagsDir = `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags`;
 
 // Try index-prefixed filename first (new format), then pure index, then SHA-based, then plain key (legacy)
@@ -888,8 +937,10 @@ if (inputArgs.migrateSegments) {
         }
       }
 
-      let segmentKey = segment.key;
-      let segmentName = segment.name;
+      const prefixedSegmentKey = applyKeyPrefix(segment.key, keyPrefix);
+      const prefixedSegmentName = applyKeyPrefix(segment.name, keyPrefix);
+      let segmentKey = prefixedSegmentKey;
+      let segmentName = prefixedSegmentName;
       let attemptCount = 0;
       let segmentCreated = false;
       let segmentAlreadyExisted = false;
@@ -938,8 +989,12 @@ if (inputArgs.migrateSegments) {
           } else if (action === 'prefix' && inputArgs.conflictPrefix && attemptCount === 1) {
             // Conflict detected with prefix enabled, retry with prefix
             console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, retrying with prefix...`));
-            segmentKey = applyConflictPrefix(segment.key, inputArgs.conflictPrefix);
-            segmentName = `${inputArgs.conflictPrefix}${segment.name}`;
+            segmentKey = applyConflictPrefix(prefixedSegmentKey, inputArgs.conflictPrefix);
+            segmentName = `${inputArgs.conflictPrefix}${prefixedSegmentName}`;
+            if (segmentKey.length > MAX_KEY_LENGTH) {
+              console.log(Colors.red(`  ✗ Segment key "${segmentKey}" exceeds ${MAX_KEY_LENGTH} characters, skipping`));
+              break;
+            }
 
             conflictTracker.addResolution({
               originalKey: segment.key,
@@ -1785,11 +1840,13 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
 
   const newVariations = flag.variations.map(({ _id, ...rest }: Variation) => rest);
 
-  let flagKey = flag.key;
-  let flagName = flag.name;
+  const prefixedFlagKey = applyKeyPrefix(flag.key, keyPrefix);
+  const prefixedFlagName = applyKeyPrefix(flag.name, keyPrefix);
+  let flagKey = prefixedFlagKey;
+  let flagName = prefixedFlagName;
   let attemptCount = 0;
   let flagCreated = false;
-  let createdFlagKey = flag.key;
+  let createdFlagKey = prefixedFlagKey;
   let flagMaintainerId: string | null = null;
   let flagAlreadyExisted = false;
 
@@ -1813,8 +1870,8 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       } else if (action === 'prefix' && inputArgs.conflictPrefix) {
         // Conflict prefix enabled - we'll try creating with prefix
         console.log(Colors.yellow(`\t⚠ Flag exists, will try with prefix "${inputArgs.conflictPrefix}"`));
-        flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
-        flagName = `${inputArgs.conflictPrefix}${flag.name}`;
+        flagKey = applyConflictPrefix(prefixedFlagKey, inputArgs.conflictPrefix);
+        flagName = `${inputArgs.conflictPrefix}${prefixedFlagName}`;
         flagAlreadyExisted = false; // Will attempt creation with prefixed key
 
         conflictTracker.addResolution({
@@ -1930,8 +1987,8 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         if (inputArgs.conflictPrefix && attemptCount === 1) {
           // Conflict detected with prefix enabled, retry with prefix
           console.log(Colors.yellow(`\t⚠ Conflict detected, retrying with prefix "${inputArgs.conflictPrefix}"`));
-          flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
-          flagName = `${inputArgs.conflictPrefix}${flag.name}`;
+          flagKey = applyConflictPrefix(prefixedFlagKey, inputArgs.conflictPrefix);
+          flagName = `${inputArgs.conflictPrefix}${prefixedFlagName}`;
           flagAlreadyExisted = false; // Reset to attempt creation with new key
           
           conflictTracker.addResolution({
@@ -2087,7 +2144,21 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
     Object.keys(parsedData)
       .map((key) => {
         if (key == "rules") {
-            patchReq.push(buildRulesReplace(parsedData[key] as unknown as Rule[], "environments/" + destEnvKey));
+            const envRules = keyPrefix
+              ? remapRuleSegmentReferences(
+                parsedData[key] as unknown as Rule[],
+                { segmentKeys: migratedSegmentKeys, keyPrefix },
+              )
+              : parsedData[key] as unknown as Rule[];
+            patchReq.push(buildRulesReplace(envRules, "environments/" + destEnvKey));
+        } else if (key == "prerequisites" && keyPrefix && Array.isArray(parsedData[key])) {
+          patchReq.push(
+            buildPatch(
+              `environments/${destEnvKey}/${key}`,
+              "replace",
+              remapPrerequisites(parsedData[key] as unknown as Array<{ key?: string }>, { flagKeys: migratedFlagKeys, keyPrefix }),
+            ),
+          );
         } else {
           patchReq.push(
             buildPatch(

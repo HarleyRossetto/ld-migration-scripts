@@ -19,6 +19,10 @@ migration:
   # tags:
   #   - imported-from-legacy
   #   - billing-team
+
+  # Optional prefix added to every migrated flag/segment key and name.
+  # Letters, numbers, '.', '-' and '_' only; resulting keys must be <= 100 chars.
+  # keyPrefix: "proj-a."
   
   # Preview migration without making changes (optional)
   # dryRun: true

@@ -411,6 +411,7 @@ migration:                   # Optional - for migrate step
   assignMaintainerIds: boolean
   migrateSegments: boolean
   tags: string[] | null      # Optional tags added to migrated flags and segments
+  keyPrefix: string | null   # Optional prefix added to every migrated flag/segment key and name
   conflictPrefix: string
   targetView: string
   environments: string[]
@@ -508,6 +509,7 @@ migration:
   tags:
     - imported-from-legacy
     - billing-team
+  keyPrefix: "proj-a."
   conflictPrefix: "imported-"
   targetView: "migration-2024"
   environments:
@@ -574,12 +576,15 @@ migration:                   # Migration settings (also accepts "options:" as al
   includeFlags: string[]                # Optional: only migrate these flag keys
   excludeFlags: string[]                # Optional: skip these flag keys
   tags: string[]                        # Optional: tags added to flags and segments
+  keyPrefix: string                     # Optional: prefix for every migrated flag/segment key and name
   concurrency: number                   # Optional: parallel flags (default: 10)
 ```
 
 **Note:** Config files accept either `migration:` or `options:` as the key for migration settings.
 
 `migration.tags` is optional (or `null`). When provided, its values are added to the source tags for migrated flags and segments. Duplicate tags are removed, and tags already present on an existing destination resource are retained. Direct `migrate` CLI usage also accepts comma-separated tags, for example `--tags imported-from-legacy,billing-team`.
+
+`migration.keyPrefix` is optional (or `null`). When set, it is prepended to the key **and** name of every migrated flag and segment, and flag prerequisites and segment-match rule clauses are rewritten to point at the prefixed keys. Keys that already start with the prefix are left unchanged. The prefix may only contain letters, numbers, `.`, `-` and `_`, and the migration aborts before making any change if a resulting key (including any `conflictPrefix`, which stacks in front of it) would exceed LaunchDarkly's 100 character limit. Direct CLI usage: `--key-prefix proj-a.`. The `revert` step uses the same `keyPrefix` from the config. Include/exclude filters and the sync manifest still use source keys; changing `keyPrefix` between runs creates new destination resources.
 
 ### Priority Order
 
